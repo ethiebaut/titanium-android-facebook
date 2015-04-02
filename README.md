@@ -1,13 +1,8 @@
 Titanium Facebook Module for Android
 =====================================
 
-Note to users upgrading to 3.20.05 or above
-------------------------------------------
-The Facebook proxy must still be created for each Activity, but it no longer has a public API. All methods, properties, and events are on the module object. The proxy's usage is entirely internal to the module. This was done mostly to improve event handling - i.e. a module event can be received by all app activities, while a proxy event would only be received by the currently active Window/TabGroup. The rest of the APIs were migrated to simplify module usage.
-
 Overview
 ------------
-* See [the sample app](https://github.com/mokesmokes/facebook-titanium-sample) for usage examples.
 * Please read thie carefully since this module is (by necessity) different from previous Facebook Android modules
 * This module is based on Facebook's latest Android SDK (3.18.0, currently), and in accordance with Facebook's samples and recommendations.
 * The API is similar to the iOS Facebook module I wrote, differing in some places where required.
@@ -25,7 +20,7 @@ Current Functionality
 
 Installation Details
 --------------------
-* The minimum required SDK version is 3.5.1 . The required functionality exists starting in 3.5.1.RC
+* The minimum required SDK version is 3.5.0 (lifecycleContainer merged October 24th)
 * If you want to use the production 3_4_X branch, you may use this, which is kept current with Appcelerator's 3_4_X: https://github.com/mokesmokes/titanium_mobile/tree/3_4_M
 * In tiapp.xml or AndroidManifest.xml you must declare the following inside the `<application>` node
 `<activity android:name="com.facebook.LoginActivity" android:theme="@android:style/Theme.Translucent.NoTitleBar" 
@@ -43,21 +38,21 @@ For example, module version 3.18.01 uses Facebook Android SDK 3.18.0
 
 Proxy required per Android activity
 -----------------------------------
-Unlike iOS, where the entire app is active in memory, in Android only a single Activity is active at any time. In Titanium, an Activity corresponds to a standalone (i.e. not a Tab window) Ti.UI.Window or Ti.UI.TabGroup. The Facebook SDK contains tools to synchronize state between the various activities in the app, and this module implements that functionality, but for this to work we need to tell the module which is the currently active Activity. Thus the following is required:
-* All Windows/TabGroup in your app must create a proxy, e.g. : `win1.fbProxy = fb.createActivityWorker({lifecycleContainer: win1});`, where `fb` is the `require`ed module.
+Unlike iOS, where the entire app is active in memory, in Android only a single Activity is active at any time. An Activity corresponds to a Ti.UI.Window or Ti.UI.TabGroup. The Facebook SDK contains tools to synchronize state between the various activities in the app, and this module implements that functionality, but for this to work we need to tell the module which is the currently active Activity. Thus the following is required:
+* All Windows/TabGroup that require Facebook functionality must create a proxy: `var fb = fbModule.createActivityWorker({lifecycleContainer: aWindowOrTabGroup});`
 * We must pass to the proxy the Ti.UI.Window or Ti.UI.TabGroup that will be using the proxy, so that the proxy can attach itself to the window's or tabgroup's activity.
 * The proxy object must be created prior to calling open() on the window or tabgroup in order to make sure the Activity onCreate event is captured correctly.
-* This proxy ***has no APIs*** (new since version 3.20.05), its sole function is to signal the Facebook SDK for the various Activity transitions. So just create it and attach it to the window/tabgroup.
+* **The entire Facebook module API**, including methods, properties, and events **occurs on the proxy object** and not on the module object.
 
 Module API
 ----------
 
-* Require the module: `var fb = require('com.ti.facebook');`
-* Create a proxy for each Activity (Window or TabGroup) in the app, and attach it to the window or tab group object so it doesn't get garbage collected, e.g.: `win.fbProxy = fbModule.createActivityWorker({lifecycleContainer: win);`
-* The permissions array may be set by calling `setPermissions(['public_profile', 'email', etc])` on the module object. Note that these are just the requested read permissions, and not necessarily the permissions granted to the app. These permissions will only be used when initially authenticating with Facebook.
+* Require the module: `var fbModule = require('com.ti.facebook');`
+* Create a proxy for each Activity (Window or TabGroup) that needs Facebook functionality: `var fb = fbModule.createActivityWorker({lifecycleContainer: win);`
+* The permissions array may be set by calling `setPermissions(['public_profile', 'email', etc])` on the proxy object, or in the proxy creation dictionary `var fb = fbModule.createActivityWorker({permissions: [.....]});`, or passed to the `initialize` function detailed below. Note that these are just the requested read permissions, and not necessarily the permissions granted to the app. These permissions will only be used when initially authenticating with Facebook. You need to set the permissions only once, for the initial proxy used in the app.
 * The actual permissions granted to the app may be read at any time by checking `var permissions = fb.permissions;` 
-* Add login and logout event listeners on the module object. The syntax and functionality is identical to the current Titanium Facebook module.
-* After setting up the login and logout listeners, call `fb.initialize([optional timeout]);`. If there is a cached Facebook session available, the login event will be fired immediately.
+* Add login and logout event listeners on the proxy object. The syntax and functionality is identical to the current Titanium Facebook module.
+* After setting up the login and logout listeners, call `fb.initialize([optional timeout]);`. If there is a cached Facebook session available, the login event will be fired immediately. `initialize` should only be called once, for the initial proxy in the app.
 * `fb.requestNewReadPermissions([new read permissions], function(e) {....});` The callback will indicate `success`, `error` or `cancelled`. If `success`, then you need to get `fb.permissions` to check the actually active permissions on the session.
 * `requestNewPublishPermissions` - same as for requestNewReadPermissions. Note these functions take on added importance since users can decline individual permissions when initially logging in, except for `public_profile` which is mandatory.
 * `fb.requestWithGraphPath` - same as in Appcelerator's Titanium module.
@@ -72,7 +67,54 @@ you *will* get a `login` event. It's important to understand the reason for this
 However, there is a possibility this token is invalid without the SDK's knowledge (e.g. the user changed her password, etc).
 Thus, the only way to verify the token's and session's validity is to make a call to Facebook's servers. 
 You will not get the `login` event if there was no cached session. 
-See [the sample app](https://github.com/mokesmokes/facebook-titanium-sample) for a full example.
+In that case - the module will close the session. Below is the integrated flow for both Android and iOS:
+```javascript
+var fbModule = require('com.ti.facebook');
+var fb = fbModule.createActivityWorker({lifecycleContainer: win1});
+fb.permissions = ['public_profile', 'email', 'user_friends'];
+// now set up listeners
+fb.addEventListener('login', function(e) {
+	if(e.success) {
+		// do your thang.... 
+	} else if (e.cancelled) {
+		// login was cancelled, just show your login UI again
+	} else if (e.error) {
+		if (Ti.Platform.name === 'iPhone OS') {
+			var loginAlert = Ti.UI.createAlertDialog({title: 'Login Error'});
+			if (e.error.indexOf('OTHER:') !== 0){
+				// guaranteed a string suitable for display to user
+				loginAlert.message = e.error;
+			} else {
+				//alert('Please check your network connection and try again.');
+				// after "OTHER:" there may be useful error data, not suitable for user display
+				loginAlert.message = 'Please check your network connection and try again';
+			}
+		} else {
+			loginAlert.message = e.error;
+		}
+	} else {
+		// if not success, nor cancelled, nor error message then pop a generic message
+		// e.g. "Check your network, etc" . This is per Facebook's instructions
+	}
+});
+
+fb.addEventListener('logout', function(e)........
+		
+fb.initialize(5000); // the module will do nothing prior to this. This enabled you to set up listeners anywhere in the app	
+                     // You can (and should) pass a timeout (in ms) for the /me request that occurs upon login,
+                     // the default value is 0 (no timeout)
+
+if (!fb.loggedIn) {
+	// you want to show your login UI in this case
+	// if the user is loggedIn, just wait for the login event
+	// when you want the user to login, call fb.authorize()
+}
+
+myLoginButton.addEventListener('click', function(e) {
+	fb.authorize(); // this will show the Facebook login UI
+	.....
+});
+```
 
 Refreshing Permissions
 ----------------------
@@ -121,7 +163,7 @@ someView.add(likeButton);
 Custom App Events
 -----------------
 ```
-fb.logCustomEvent('handsClapped'); // Pass a string for the event name, view the events on Facebook Insights
+fbActivityWorker.logCustomEvent('handsClapped'); // Pass a string for the event name, view the events on Facebook Insights
 ```
 
 Feel free to comment and help out! :)
